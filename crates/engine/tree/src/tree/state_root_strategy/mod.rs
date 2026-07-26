@@ -1115,33 +1115,28 @@ where
             .with_hashed_state(Some(hashed_state)))
     }
 
-    /// Converts a task outcome into a job outcome, recomputing serially when the task returned
-    /// a root that does not match the block header. A state-root-task bug then costs latency
-    /// instead of marking a valid block invalid; if the serial root also mismatches, validation
-    /// rejects the block.
+    /// Converts a task outcome into a job outcome.
+    ///
+    /// hl: upstream compares the task root against the block header and recomputes serially on a
+    /// mismatch. HyperEVM headers carry a zero state root, so that comparison would never match
+    /// and would force a serial recomputation on every block; the task result is taken as-is.
     fn verified_sparse_outcome(
         &self,
         block: &RecoveredBlock<N::Block>,
         output: &BlockExecutionOutput<N::Receipt>,
         outcome: StateRootComputeOutcome,
     ) -> ProviderResult<StateRootJobOutcome> {
+        // hl: upstream compares the task root against the block header and recomputes serially
+        // on a mismatch. HyperEVM headers carry a zero state root, so that comparison would never
+        // match; the task result is taken as-is.
         let outcome = self.sparse_outcome(output, outcome);
-        if outcome.state_root == block.header().state_root() {
-            publish_sparse_trie(
-                &self.pending_trie_rx,
-                &self.overlay_manager,
-                block.hash(),
-                outcome.state_root,
-            );
-            return Ok(outcome)
-        }
-        warn!(
-            target: "engine::tree::state_root_strategy",
-            state_root = ?outcome.state_root,
-            block_state_root = ?block.header().state_root(),
-            "State root task returned incorrect state root, recomputing serially"
+        publish_sparse_trie(
+            &self.pending_trie_rx,
+            &self.overlay_manager,
+            block.hash(),
+            outcome.state_root,
         );
-        self.compute_serial(output)
+        Ok(outcome)
     }
 
     fn sparse_outcome(
@@ -1217,23 +1212,16 @@ where
 
         loop {
             if let Ok(Ok(outcome)) = task_rx.try_recv() {
+                // hl: the header state root is always zero, so the task result cannot be
+                // checked against it and is accepted as-is.
                 let outcome = self.sparse_outcome(&output, outcome);
-                if outcome.state_root == block.header().state_root() {
-                    publish_sparse_trie(
-                        &self.pending_trie_rx,
-                        &self.overlay_manager,
-                        block.hash(),
-                        outcome.state_root,
-                    );
-                    return Ok(outcome)
-                }
-                // A wrong task root falls through to the serial fallback already racing below.
-                warn!(
-                    target: "engine::tree::state_root_strategy",
-                    state_root = ?outcome.state_root,
-                    block_state_root = ?block.header().state_root(),
-                    "State root task returned incorrect state root, using serial fallback"
+                publish_sparse_trie(
+                    &self.pending_trie_rx,
+                    &self.overlay_manager,
+                    block.hash(),
+                    outcome.state_root,
                 );
+                return Ok(outcome)
             }
 
             match fallback_rx.try_recv() {
