@@ -287,6 +287,42 @@ mod tests {
         assert_eq!(table, BTreeMap::from([(shard(u64::MAX), vec![1, 2, 3])]));
     }
 
+    /// `Address::ZERO` sorts first in the collector. It must still be merged with its existing
+    /// last shard instead of overwriting it (it used to equal the `Default` sentinel).
+    #[tokio::test]
+    async fn insert_index_to_not_empty_shard_zero_address() {
+        let db = TestStageDB::default();
+        let zero = |highest_block_number| ShardedKey { key: Address::ZERO, highest_block_number };
+        db.commit(|tx| {
+            for block in 0..=MAX_BLOCK {
+                tx.put::<tables::BlockBodyIndices>(
+                    block,
+                    StoredBlockBodyIndices { tx_count: 3, ..Default::default() },
+                )?;
+                tx.put::<tables::AccountChangeSets>(
+                    block,
+                    AccountBeforeTx { address: Address::ZERO, info: None },
+                )?;
+                tx.put::<tables::AccountChangeSets>(block, acc())?;
+            }
+            tx.put::<tables::AccountsHistory>(zero(u64::MAX), list(&[1, 2, 3])).unwrap();
+            tx.put::<tables::AccountsHistory>(shard(u64::MAX), list(&[1, 2, 3])).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        run(&db, 5, Some(3));
+
+        let table = cast(db.table::<tables::AccountsHistory>().unwrap());
+        assert_eq!(
+            table,
+            BTreeMap::from([
+                (zero(u64::MAX), vec![1, 2, 3, 4, 5]),
+                (shard(u64::MAX), vec![1, 2, 3, 4, 5]),
+            ])
+        );
+    }
+
     #[tokio::test]
     async fn insert_index_to_full_shard() {
         // init

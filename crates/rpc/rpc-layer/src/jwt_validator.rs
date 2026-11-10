@@ -47,8 +47,7 @@ fn get_bearer(headers: &HeaderMap) -> Option<String> {
     let header = headers.get(header::AUTHORIZATION)?;
     let auth: &str = header.to_str().ok()?;
     let prefix = "Bearer ";
-    let index = auth.find(prefix)?;
-    let token: &str = &auth[index + prefix.len()..];
+    let token: &str = auth.strip_prefix(prefix)?;
     Some(token.into())
 }
 
