@@ -344,7 +344,7 @@ where
         let highest_block = static_file_provider
             .get_highest_static_file_block(StaticFileSegment::Headers)
             .unwrap_or_default();
-        let static_file_headers_to_unwind = highest_block - input.unwind_to;
+        let static_file_headers_to_unwind = highest_block.saturating_sub(input.unwind_to);
         for block_number in (input.unwind_to + 1)..=highest_block {
             let hash = static_file_provider.block_hash(block_number)?;
             // we have to delete from HeaderNumbers here as well as in the above unwind, since that
