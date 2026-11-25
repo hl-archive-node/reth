@@ -1659,6 +1659,10 @@ where
             &mut new_txs,
             SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE,
         ) {
+            // A closed listener (e.g. `NoopTransactionPool`, whose sender is dropped at creation)
+            // is ready with nothing on every poll; treating that as "maybe more" re-woke this
+            // task forever and pinned a core.
+            Poll::Ready(0) => false,
             Poll::Ready(count) => {
                 if count == SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE {
                     // we filled the entire buffer capacity and need to try again on the next poll
@@ -1671,7 +1675,10 @@ where
                     let limit =
                         SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE -
                             new_txs.len();
-                    this.pending_transactions.poll_recv_many(cx, &mut new_txs, limit).is_ready()
+                    matches!(
+                        this.pending_transactions.poll_recv_many(cx, &mut new_txs, limit),
+                        Poll::Ready(n) if n > 0
+                    )
                 }
             }
             Poll::Pending => false,
@@ -2498,6 +2505,47 @@ mod tests {
             tx_gen.transaction().nonce(nonce).into_eip1559().try_into_recovered().unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closed_pending_transactions_listener_does_not_self_wake() {
+        // `NoopTransactionPool` hands out listeners whose sender is already dropped, so the
+        // pending transactions channel is closed from the start.
+        let secret_key = SecretKey::new(&mut rand_08::thread_rng());
+        let config = NetworkConfigBuilder::eth(secret_key, Runtime::test())
+            .disable_discovery()
+            .listener_port(0)
+            .build(NoopProvider::default());
+        let transactions_manager_config = config.transactions_manager_config.clone();
+        let (_network_handle, network, mut transactions, _) = NetworkManager::new(config)
+            .await
+            .unwrap()
+            .into_builder()
+            .transactions(
+                reth_transaction_pool::noop::NoopTransactionPool::<EthPooledTransaction>::default(),
+                transactions_manager_config,
+            )
+            .split_with_handle();
+        tokio::task::spawn(network);
+
+        struct Flag(Arc<std::sync::atomic::AtomicBool>);
+        impl std::task::Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = std::task::Waker::from(Arc::new(Flag(woken.clone())));
+        let mut cx = std::task::Context::from_waker(&waker);
+
+        // Startup work may legitimately take a few polls; an idle manager must then settle
+        // instead of re-waking itself on every poll.
+        let settled = (0..16).any(|_| {
+            woken.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::pin::Pin::new(&mut transactions).poll(&mut cx);
+            !woken.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        assert!(settled, "transactions manager keeps waking itself with nothing to do");
     }
 
     #[tokio::test(flavor = "multi_thread")]
